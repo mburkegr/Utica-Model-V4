@@ -2516,6 +2516,7 @@ def build_email_html(
     quarterly_output_styler,
     irr_oil_bid_heatmap,
     irr_gas_bid_heatmap,
+    irr_oil_gas_heatmap,
     irr_heatmap,
     irr_tcrisk_bid_heatmap,
     irr_ngl_yield_bid_heatmap,
@@ -2640,6 +2641,24 @@ def build_email_html(
                     width=1100,
                     height=450,
                     title="Spud Date vs. TC Risk IRR",
+                    max_width_px=760,
+                )}
+            </td>
+        </tr>
+        <tr>
+            <td
+                colspan="2"
+                style="
+                    vertical-align:top;
+                    padding:12px 8px 0 8px;
+                    text-align:center;
+                "
+            >
+                {html_img_from_fig(
+                    irr_oil_gas_heatmap,
+                    width=1100,
+                    height=450,
+                    title="Oil Price vs. Gas Price IRR",
                     max_width_px=760,
                 )}
             </td>
@@ -3870,6 +3889,15 @@ if (
             y_variable=main_variable,
         )
 
+        irr_oil_gas_df, moic_oil_gas_df = run_two_way_sensitivity(
+            slot_df=slot_df,
+            deal_inputs=deal_inputs,
+            x_values=oil_values,
+            x_variable="oil",
+            y_values=gas_values,
+            y_variable="gas",
+        )
+        
         irr_ngl_yield_bid_df, moic_ngl_yield_bid_df = run_two_way_sensitivity(
             slot_df=slot_df,
             deal_inputs=deal_inputs,
@@ -3927,6 +3955,30 @@ if (
             base_y=main_base,
         )
 
+        irr_oil_gas_heatmap = build_heatmap(
+            irr_oil_gas_df,
+            "IRR Sensitivity",
+            metric="irr",
+            x_title="Oil Price ($/bbl)",
+            y_title="Gas Price ($/mcf)",
+            x_format="dollar",
+            y_format="dollar",
+            base_x=deal_inputs["oil_price"],
+            base_y=deal_inputs["gas_price"],
+        )
+        
+        moic_oil_gas_heatmap = build_heatmap(
+            moic_oil_gas_df,
+            "MOIC Sensitivity",
+            metric="moic",
+            x_title="Oil Price ($/bbl)",
+            y_title="Gas Price ($/mcf)",
+            x_format="dollar",
+            y_format="dollar",
+            base_x=deal_inputs["oil_price"],
+            base_y=deal_inputs["gas_price"],
+        )
+        
         irr_ngl_yield_bid_heatmap = build_heatmap(
             irr_ngl_yield_bid_df,
             "IRR Sensitivity",
@@ -4065,6 +4117,34 @@ if (
                 st.markdown("### MOIC Sensitivity")
                 st.plotly_chart(moic_gas_bid_heatmap, use_container_width=True)
 
+        with st.expander(
+            "Oil Price vs. Gas Price Sensitivity",
+            expanded=False,
+        ):
+            if deal_inputs.get("pricing_mode") == "file":
+                st.caption(
+                    "Each oil and gas sensitivity value shifts the applicable "
+                    "uploaded pricing curve by the change from its base terminal "
+                    "price and uses the sensitivity value as the new terminal "
+                    "flat price."
+                )
+        
+            col1, col2 = st.columns(2)
+        
+            with col1:
+                st.markdown("### IRR Sensitivity")
+                st.plotly_chart(
+                    irr_oil_gas_heatmap,
+                    use_container_width=True,
+                )
+        
+            with col2:
+                st.markdown("### MOIC Sensitivity")
+                st.plotly_chart(
+                    moic_oil_gas_heatmap,
+                    use_container_width=True,
+                )
+        
         with st.expander(
             f"{cross_x_title} vs. {main_title} Sensitivity",
             expanded=False,
@@ -4241,6 +4321,7 @@ if (
             quarterly_output_styler=quarterly_output_styler,
             irr_oil_bid_heatmap=irr_oil_bid_heatmap,
             irr_gas_bid_heatmap=irr_gas_bid_heatmap,
+            irr_oil_gas_heatmap=irr_oil_gas_heatmap,
             irr_heatmap=irr_heatmap,
             irr_tcrisk_bid_heatmap=irr_tcrisk_bid_heatmap,
             irr_ngl_yield_bid_heatmap=irr_ngl_yield_bid_heatmap,
