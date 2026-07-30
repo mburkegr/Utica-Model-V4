@@ -11,6 +11,7 @@ import base64
 from model import (
     run_deal_model,
     load_type_curve_library,
+    load_price_file,
     prepare_slot_inputs,
     prepare_deal_settings,
     prepare_global_assumptions,
@@ -18,6 +19,8 @@ from model import (
     build_slot_ngl_factors,
     run_single_slot_economics,
 )
+
+PRICE_FILE_PATH = "price_file_library.xlsx"
 
 st.set_page_config(page_title="Utica Deal Model", layout="wide")
 
@@ -30,6 +33,8 @@ def pretty_column_name(col):
         "date": "Date",
         "slot_id": "Slot ID",
         "tc_name": "Type Curve",
+        "index_oil_price": "Index Oil Price",
+        "index_gas_price": "Index Gas Price",
         "slot_net_oil_production": "Net Oil Production",
         "slot_net_gas_production": "Net Gas Production",
         "slot_net_ngl_production": "Net NGL Production",
@@ -1012,6 +1017,28 @@ def build_quarterly_output_table(deal_df, all_slots_df, slot_df, deal_inputs):
         end = pd.Timestamp(year=year, month=12, day=31)
         return (end - start).days + 1
 
+    q_prices = (
+    deal.groupby("quarter_label")[
+        [
+            "index_oil_price",
+            "index_gas_price",
+        ]
+    ]
+    .mean()
+    .reindex(quarter_order)
+    )
+    
+    y_prices = (
+        deal.groupby("year_label")[
+            [
+                "index_oil_price",
+                "index_gas_price",
+            ]
+        ]
+        .mean()
+        .reindex(year_order)
+    )
+    
     q_days = pd.Series({q: quarter_days_from_label(q) for q in quarter_order}, index=quarter_order, dtype=float)
     y_days = pd.Series({y: year_days_from_label(y) for y in year_order}, index=year_order, dtype=float)
 
@@ -1066,16 +1093,24 @@ def build_quarterly_output_table(deal_df, all_slots_df, slot_df, deal_inputs):
     def safe_div(n, d):
         return np.where((d != 0) & pd.notnull(d), n / d, 0.0)
 
-    def build_section(df, days):
+    def build_section(df, days, index_prices):
         out = pd.DataFrame(index=[], columns=df.index)
 
-        oil_price_flat = float(deal_inputs["oil_price"])
-        gas_price_flat = float(deal_inputs["gas_price"])
+        oil_index_price = index_prices[
+            "index_oil_price"
+        ]
+        
+        gas_index_price = index_prices[
+            "index_gas_price"
+        ]
 
         realized_oil = safe_div(df["slot_oil_revenue"], df["slot_net_oil_production"])
         realized_gas = safe_div(df["slot_gas_revenue"], df["slot_net_gas_production"])
         realized_ngl_price = safe_div(df["slot_ngl_revenue"], df["slot_net_ngl_production"])
-        realized_ngl_pct_wti = safe_div(realized_ngl_price, oil_price_flat)
+        realized_ngl_pct_wti = safe_div(
+            realized_ngl_price,
+            oil_index_price,
+        )
 
         oil_mbbl_d = safe_div(df["slot_net_oil_production"], days)
         ngl_mbbl_d = safe_div(df["slot_net_ngl_production"], days)
@@ -1099,8 +1134,13 @@ def build_quarterly_output_table(deal_df, all_slots_df, slot_df, deal_inputs):
 
         free_cash_flow = df["slot_total_cash_flow"]
 
-        out.loc["Assumed Index Pricing - Crude Oil"] = oil_price_flat
-        out.loc["Assumed Index Pricing - Natural Gas"] = gas_price_flat
+        out.loc[
+            "Assumed Index Pricing - Crude Oil"
+        ] = oil_index_price
+        
+        out.loc[
+            "Assumed Index Pricing - Natural Gas"
+        ] = gas_index_price
         out.loc["Realized Pricing - Crude Oil"] = realized_oil
         out.loc["Realized Pricing - NGL (% of WTI)"] = realized_ngl_pct_wti
         out.loc["Realized Pricing - Natural Gas"] = realized_gas
@@ -1126,8 +1166,17 @@ def build_quarterly_output_table(deal_df, all_slots_df, slot_df, deal_inputs):
 
         return out
 
-    q_out = build_section(q, q_days)
-    y_out = build_section(y, y_days)
+    q_out = build_section(
+        q,
+        q_days,
+        q_prices,
+    )
+    
+    y_out = build_section(
+        y,
+        y_days,
+        y_prices,
+    )
 
     q_out.loc["Gross Wells Spud"] = q_spud["gross_wells_spud"]
     q_out.loc["Net Wells Spud"] = q_spud["net_wells_spud"]
@@ -2787,8 +2836,118 @@ st.sidebar.subheader("Timing")
 effective_date = st.sidebar.date_input("Effective Date", value=next_month_start())
 
 st.sidebar.subheader("Pricing")
-oil_price = st.sidebar.number_input("Oil Price ($/bbl)", value=60.0, step=1.0)
-gas_price = st.sidebar.number_input("Gas Price ($/mcf)", value=3.75, step=0.05)
+
+use_monthly_pricing_file = st.sidebar.toggle(
+    "Use Monthly Pricing File",
+    value=False,
+    help=(
+        "Off = use flat oil and gas prices for the entire model. "
+        "On = use price_file_library.xlsx until each commodity's "
+        "selected flat-pricing date."
+    ),
+)
+
+pricing_mode = (
+    "file"
+    if use_monthly_pricing_file
+    else "flat"
+)
+
+if pricing_mode == "flat":
+    oil_col, gas_col = st.sidebar.columns(2)
+
+    with oil_col:
+        oil_price = st.number_input(
+            "Oil Price ($/bbl)",
+            min_value=0.0,
+            value=60.0,
+            step=1.0,
+            format="%.2f",
+            key="flat_mode_oil_price",
+        )
+
+    with gas_col:
+        gas_price = st.number_input(
+            "Gas Price ($/mcf)",
+            min_value=0.0,
+            value=3.75,
+            step=0.05,
+            format="%.3f",
+            key="flat_mode_gas_price",
+        )
+
+    # These dates are ignored in flat mode.
+    oil_flat_start_date = date(1900, 1, 1)
+    gas_flat_start_date = date(1900, 1, 1)
+
+else:
+    try:
+        pricing_preview_df = load_price_file(
+            PRICE_FILE_PATH
+        )
+
+    except (FileNotFoundError, ValueError) as error:
+        st.sidebar.error(str(error))
+        st.stop()
+
+    first_pricing_month = (
+        pricing_preview_df["month"].min()
+    )
+
+    last_pricing_month = (
+        pricing_preview_df["month"].max()
+    )
+
+    default_flat_start = (
+        last_pricing_month
+        + pd.offsets.MonthBegin(1)
+    ).date()
+
+    st.sidebar.caption(
+        "Pricing file range: "
+        f"{first_pricing_month:%b %Y} through "
+        f"{last_pricing_month:%b %Y}"
+    )
+
+    oil_col, gas_col = st.sidebar.columns(2)
+
+    with oil_col:
+        st.markdown("**Oil**")
+
+        oil_flat_start_date = st.date_input(
+            "Switch to Flat",
+            value=default_flat_start,
+            format="MM/DD/YYYY",
+            key="oil_flat_start_date",
+        )
+
+        oil_price = st.number_input(
+            "Flat Oil ($/bbl)",
+            min_value=0.0,
+            value=60.0,
+            step=1.0,
+            format="%.2f",
+            key="terminal_oil_price",
+        )
+
+    with gas_col:
+        st.markdown("**Gas**")
+
+        gas_flat_start_date = st.date_input(
+            "Switch to Flat",
+            value=default_flat_start,
+            format="MM/DD/YYYY",
+            key="gas_flat_start_date",
+        )
+
+        gas_price = st.number_input(
+            "Flat Gas ($/mcf)",
+            min_value=0.0,
+            value=3.75,
+            step=0.05,
+            format="%.3f",
+            key="terminal_gas_price",
+        )
 
 st.sidebar.subheader("Overrides")
 
@@ -2965,6 +3124,20 @@ deal_inputs = {
     "effective_date": effective_date,
     "oil_price": oil_price,
     "gas_price": gas_price,
+    "pricing_mode": pricing_mode,
+    "pricing_file_path": PRICE_FILE_PATH,
+
+    # Flat prices in flat mode.
+    # Terminal flat prices in file mode.
+    "oil_price": float(oil_price),
+    "gas_price": float(gas_price),
+
+    # Preserve the original base case for pricing sensitivities.
+    "base_oil_price": float(oil_price),
+    "base_gas_price": float(gas_price),
+
+    "oil_flat_start_date": oil_flat_start_date,
+    "gas_flat_start_date": gas_flat_start_date,
     "use_dc_override": use_dc_override,
     "dc_override": dc_override,
     "use_bid_override": use_bid_override,
@@ -3309,6 +3482,8 @@ if run_model_clicked:
 # -----------------------------
 DEAL_DISPLAY_COLS = [
     "date",
+    "index_oil_price",
+    "index_gas_price",
     "promote_cumulative_investment",
     "promote_cumulative_distributions",
     "promote_running_multiple",
