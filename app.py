@@ -134,6 +134,11 @@ def format_accounting_production(
 def format_display_df(df):
     display_df = df.copy()
 
+    price_decimals = {
+        "index_oil_price": 2,
+        "index_gas_price": 3,
+    }
+    
     percent_cols = {
         "working_interest",
         "pre_promote_working_interest",
@@ -149,6 +154,15 @@ def format_display_df(df):
         elif pd.api.types.is_bool_dtype(display_df[col]):
             display_df[col] = display_df[col].map(
                 lambda x: "Yes" if bool(x) else "No"
+            )
+        elif col in price_decimals:
+            display_df[col] = display_df[col].map(
+                lambda x: format_accounting_number(
+                    x,
+                    decimals=price_decimals[col],
+                    prefix="$",
+                    zero_as_dash=False,
+                )
             )
         elif col in percent_cols:
             display_df[col] = display_df[col].map(
@@ -2513,6 +2527,33 @@ def build_email_html(
     base_gas = float(deal_inputs["gas_price"])
     base_oil = float(deal_inputs["oil_price"])
 
+    pricing_mode = str(
+        deal_inputs.get("pricing_mode", "flat")
+    ).lower()
+    
+    if pricing_mode == "file":
+        oil_switch_date = pd.Timestamp(
+            deal_inputs["oil_flat_start_date"]
+        )
+    
+        gas_switch_date = pd.Timestamp(
+            deal_inputs["gas_flat_start_date"]
+        )
+    
+        pricing_summary = (
+            "Monthly pricing deck, with oil transitioning to "
+            f"${base_oil:,.2f}/Bbl beginning "
+            f"{oil_switch_date:%B %Y} and gas transitioning to "
+            f"${base_gas:,.3f}/Mcf beginning "
+            f"{gas_switch_date:%B %Y}"
+        )
+    
+    else:
+        pricing_summary = (
+            f"${base_oil:,.2f}/Bbl oil and "
+            f"${base_gas:,.3f}/Mcf gas"
+        )
+
     base_dc = (
         float(deal_inputs["dc_override"])
         if deal_inputs["use_dc_override"]
@@ -2634,8 +2675,7 @@ def build_email_html(
         <p><b>Base Case Summary:</b></p>
         <ul style="margin-top:0;">
             <li>
-                Pricing: ${base_gas:.2f}/Mcf gas
-                {" (dry gas, no oil)" if base_oil == 0 else f" and ${base_oil:.0f}/Bbl oil"}
+                Pricing: {pricing_summary}
             </li>
             <li>
                 D&amp;C Costs: ${base_dc:,.0f}/ft
@@ -2683,7 +2723,7 @@ def build_email_html(
 # Bump this value whenever the editor schema or stored model-result schema
 # changes. Streamlit can retain old widget/session values across a hot reload,
 # which may leave the page blank or stuck after a deployment.
-APP_STATE_VERSION = "sensitivity-axis-toggle-v2"
+APP_STATE_VERSION = "monthly-pricing-file-v1"
 
 if st.session_state.get("_app_state_version") != APP_STATE_VERSION:
     # Clear stale data-editor widget state and prior calculated outputs.
@@ -2917,8 +2957,13 @@ else:
         oil_flat_start_date = st.date_input(
             "Switch to Flat",
             value=default_flat_start,
+            max_value=default_flat_start,
             format="MM/DD/YYYY",
             key="oil_flat_start_date",
+            help=(
+                "The selected month uses the flat price. "
+                "The pricing file is used only for earlier months."
+            ),
         )
 
         oil_price = st.number_input(
@@ -2936,8 +2981,13 @@ else:
         gas_flat_start_date = st.date_input(
             "Switch to Flat",
             value=default_flat_start,
+            max_value=default_flat_start,
             format="MM/DD/YYYY",
             key="gas_flat_start_date",
+            help=(
+                "The selected month uses the flat price. "
+                "The pricing file is used only for earlier months."
+            ),
         )
 
         gas_price = st.number_input(
@@ -2948,6 +2998,21 @@ else:
             format="%.3f",
             key="terminal_gas_price",
         )
+
+    # Normalize the selected dates to the first day of each month.
+    oil_flat_start_date = (
+        pd.Timestamp(oil_flat_start_date)
+        .to_period("M")
+        .to_timestamp()
+        .date()
+    )
+
+    gas_flat_start_date = (
+        pd.Timestamp(gas_flat_start_date)
+        .to_period("M")
+        .to_timestamp()
+        .date()
+    )
 
 st.sidebar.subheader("Overrides")
 
@@ -3122,8 +3187,6 @@ deal_inputs = {
     "use_acquisition_override": use_acquisition_override,
     "acquisition_cost_override": acquisition_cost_override,
     "effective_date": effective_date,
-    "oil_price": oil_price,
-    "gas_price": gas_price,
     "pricing_mode": pricing_mode,
     "pricing_file_path": PRICE_FILE_PATH,
 
@@ -3511,6 +3574,8 @@ SLOT_DISPLAY_COLS = [
     "slot_id",
     "tc_name",
     "date",
+    "index_oil_price",
+    "index_gas_price",
     "economic_limit_reached",
     "well_shut_in",
     "pre_shut_in_operating_cf",
@@ -3649,6 +3714,14 @@ if (
     if not disable_heavy_outputs:
         st.subheader("Sensitivity Tables")
 
+        if deal_inputs.get("pricing_mode") == "file":
+            st.caption(
+                "In monthly pricing mode, oil and gas sensitivities shift the "
+                "entire uploaded pricing curve by the change from the base "
+                "terminal price and apply the sensitivity value as the new "
+                "terminal flat price."
+            )
+        
         scenario_scatter_chart = build_scenario_scatter_chart(
             slot_df=slot_df,
             deal_inputs=deal_inputs,
