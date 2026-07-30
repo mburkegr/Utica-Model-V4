@@ -352,18 +352,18 @@ def build_slot_template(num_slots):
                 "drilling_spud_month": next_month_start(),
                 "flowback_delay": 4,
                 "net_revenue_interest": 0.80,
-                "lateral_length": 10000,
+                "lateral_length": 15000,
                 "dc_costs": 750.0,
                 "tc_risk": 1.00,
                 "bid_per_acre": 8000.0,
                 "oil_diff": -10.00,
-                "gas_diff": -3.00,
+                "gas_diff": -2.75,
                 "ngl_diff": 0.00,
                 "oil_opex_bbl": 1.78,
                 "gas_opex_mcf": 0.25,
                 "ngl_opex": 2.50,
                 "fixed_loe": 3534.0,
-                "ngl_yield": 3.0,
+                "ngl_yield": 4.2,
             }
         )
     return pd.DataFrame(rows)
@@ -3169,11 +3169,11 @@ with st.sidebar.expander("NGL Shrink Factors", expanded=False):
     shrink_pentanes = st.number_input("Pentanes Shrink", value=0.10968, step=0.001, format="%.5f")
 
 with st.sidebar.expander("NGL Component Prices", expanded=False):
-    price_ethane = st.number_input("Ethane Price", value=0.27, step=0.01, format="%.5f")
-    price_propane = st.number_input("Propane Price", value=0.64625, step=0.01, format="%.5f")
-    price_isobutane = st.number_input("Isobutane Price", value=0.84, step=0.01, format="%.5f")
-    price_butane = st.number_input("Butane Price", value=0.7825, step=0.01, format="%.5f")
-    price_pentanes = st.number_input("Pentanes Price", value=1.22125, step=0.01, format="%.5f")
+    price_ethane = st.number_input("Ethane Price", value=0.23450, step=0.01, format="%.5f")
+    price_propane = st.number_input("Propane Price", value=0.82528, step=0.01, format="%.5f")
+    price_isobutane = st.number_input("Isobutane Price", value=0.76020, step=0.01, format="%.5f")
+    price_butane = st.number_input("Butane Price", value=0.61473, step=0.01, format="%.5f")
+    price_pentanes = st.number_input("Pentanes Price", value=1.28987, step=0.01, format="%.5f")
 
 st.sidebar.subheader("WI Reversion")
 
