@@ -2723,7 +2723,7 @@ def build_email_html(
 # Bump this value whenever the editor schema or stored model-result schema
 # changes. Streamlit can retain old widget/session values across a hot reload,
 # which may leave the page blank or stuck after a deployment.
-APP_STATE_VERSION = "monthly-pricing-file-v1"
+APP_STATE_VERSION = "monthly-pricing-file-v2"
 
 if st.session_state.get("_app_state_version") != APP_STATE_VERSION:
     # Clear stale data-editor widget state and prior calculated outputs.
@@ -2734,6 +2734,16 @@ if st.session_state.get("_app_state_version") != APP_STATE_VERSION:
     for stale_key in [
         "slot_editor",
         "slot_editor_v2",
+    
+        # Pricing widgets
+        "use_monthly_pricing_file",
+        "flat_mode_oil_price",
+        "flat_mode_gas_price",
+        "oil_flat_start_date",
+        "gas_flat_start_date",
+        "terminal_oil_price",
+        "terminal_gas_price",
+    
         "model_deal_inputs",
         "deal_df",
         "all_slots_df",
@@ -2880,6 +2890,7 @@ st.sidebar.subheader("Pricing")
 use_monthly_pricing_file = st.sidebar.toggle(
     "Use Monthly Pricing File",
     value=False,
+    key="use_monthly_pricing_file",
     help=(
         "Off = use flat oil and gas prices for the entire model. "
         "On = use price_file_library.xlsx until each commodity's "
