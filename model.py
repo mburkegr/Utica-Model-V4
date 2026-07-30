@@ -53,6 +53,11 @@ def _load_price_file_cached(file_path, file_mtime):
         sheet_name="Data",
     )
 
+    if pricing_df.empty:
+        raise ValueError(
+            "The pricing file does not contain any pricing rows."
+        )
+    
     required_columns = {
         "month",
         "oil_price",
@@ -820,6 +825,8 @@ def build_slot_financials(
     ).copy()
 
     required_cols = [
+        "index_oil_price",
+        "index_gas_price",
         "gross_oil_production",
         "gross_gas_production",
         "gross_ngl_production",
@@ -1067,6 +1074,29 @@ def build_all_slot_financials(
             slot_df,
             deal_settings["effective_date"],
             months=360,
+        )
+
+        # Repopulate the monthly index prices across the entire
+        # aligned 360-month calendar.
+        aligned_index_pricing = build_index_price_series(
+            dates=slot_df["date"],
+            global_assumptions=global_assumptions,
+        )
+        
+        slot_df = (
+            slot_df
+            .drop(
+                columns=[
+                    "index_oil_price",
+                    "index_gas_price",
+                ],
+                errors="ignore",
+            )
+            .merge(
+                aligned_index_pricing,
+                on="date",
+                how="left",
+            )
         )
 
         # These are slot-level attributes and must remain populated on every
@@ -1656,6 +1686,8 @@ def build_slot_audit_view(all_slots_df):
         "date",
         "month_label",
         "period",
+        "index_oil_price",
+        "index_gas_price",
         "gross_wells",
         "net_wells",
         "working_interest",
