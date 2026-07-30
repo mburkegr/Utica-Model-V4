@@ -44,6 +44,128 @@ def load_type_curve_library(file_path="type_curve_library.xlsx"):
     file_mtime = os.path.getmtime(file_path)
     return _load_type_curve_library_cached(file_path, file_mtime)
 
+@lru_cache(maxsize=8)
+def _load_price_file_cached(file_path, file_mtime):
+    """Read and validate the monthly oil and gas pricing file."""
+
+    pricing_df = pd.read_excel(
+        file_path,
+        sheet_name="Data",
+    )
+
+    required_columns = {
+        "month",
+        "oil_price",
+        "gas_price",
+    }
+
+    missing_columns = required_columns - set(pricing_df.columns)
+
+    if missing_columns:
+        raise ValueError(
+            "Pricing file is missing required columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    pricing_df = pricing_df[
+        [
+            "month",
+            "oil_price",
+            "gas_price",
+        ]
+    ].copy()
+
+    # This works whether Excel stores the month as an actual date
+    # or as text such as 01/01/2026.
+    pricing_df["month"] = pd.to_datetime(
+        pricing_df["month"],
+        errors="coerce",
+    )
+
+    pricing_df["oil_price"] = pd.to_numeric(
+        pricing_df["oil_price"],
+        errors="coerce",
+    )
+
+    pricing_df["gas_price"] = pd.to_numeric(
+        pricing_df["gas_price"],
+        errors="coerce",
+    )
+
+    if pricing_df["month"].isna().any():
+        raise ValueError(
+            "The pricing file contains one or more invalid months."
+        )
+
+    if pricing_df[["oil_price", "gas_price"]].isna().any().any():
+        raise ValueError(
+            "The pricing file contains one or more invalid oil or gas prices."
+        )
+
+    # Normalize every date to the first day of its month.
+    pricing_df["month"] = (
+        pricing_df["month"]
+        .dt.to_period("M")
+        .dt.to_timestamp()
+    )
+
+    pricing_df = (
+        pricing_df
+        .sort_values("month")
+        .reset_index(drop=True)
+    )
+
+    duplicate_months = pricing_df.loc[
+        pricing_df["month"].duplicated(keep=False),
+        "month",
+    ]
+
+    if not duplicate_months.empty:
+        duplicate_text = ", ".join(
+            duplicate_months.dt.strftime("%b %Y").unique()
+        )
+
+        raise ValueError(
+            f"The pricing file contains duplicate months: {duplicate_text}"
+        )
+
+    # Verify that there are no missing months inside the deck.
+    expected_months = pd.date_range(
+        start=pricing_df["month"].min(),
+        end=pricing_df["month"].max(),
+        freq="MS",
+    )
+
+    actual_months = pd.DatetimeIndex(pricing_df["month"])
+
+    missing_months = expected_months.difference(actual_months)
+
+    if not missing_months.empty:
+        missing_text = ", ".join(
+            missing_months.strftime("%b %Y")
+        )
+
+        raise ValueError(
+            f"The pricing file is missing monthly pricing for: {missing_text}"
+        )
+
+    return pricing_df
+
+
+def load_price_file(file_path="price_file_library.xlsx"):
+    """Load the pricing file and refresh the cache when GitHub updates it."""
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(
+            f"Pricing file was not found: {file_path}"
+        )
+
+    file_mtime = os.path.getmtime(file_path)
+
+    return _load_price_file_cached(
+        file_path,
+        file_mtime,
+    ).copy()
 
 def default_effective_date():
     today = date.today()
@@ -51,6 +173,179 @@ def default_effective_date():
         return pd.Timestamp(today.year + 1, 1, 1)
     return pd.Timestamp(today.year, today.month + 1, 1)
 
+def build_index_price_series(
+    dates,
+    global_assumptions,
+):
+    """
+    Build the monthly WTI and Henry Hub pricing series.
+
+    Flat mode:
+        Uses the app-entered oil and gas prices for every month.
+
+    File mode:
+        Uses the pricing file before each commodity's switch date.
+        Uses the app-entered flat price beginning with the switch month.
+    """
+
+    output = pd.DataFrame({
+        "date": pd.to_datetime(pd.Series(dates))
+    })
+
+    output["date"] = (
+        output["date"]
+        .dt.to_period("M")
+        .dt.to_timestamp()
+    )
+
+    pricing_mode = str(
+        global_assumptions.get("pricing_mode", "flat")
+    ).lower()
+
+    terminal_oil_price = float(
+        global_assumptions["oil_price"]
+    )
+
+    terminal_gas_price = float(
+        global_assumptions["gas_price"]
+    )
+
+    # Preserve your current flat-pricing behavior.
+    if pricing_mode == "flat":
+        output["index_oil_price"] = terminal_oil_price
+        output["index_gas_price"] = terminal_gas_price
+
+        return output[
+            [
+                "date",
+                "index_oil_price",
+                "index_gas_price",
+            ]
+        ]
+
+    if pricing_mode != "file":
+        raise ValueError(
+            f"Unsupported pricing mode: {pricing_mode}"
+        )
+
+    pricing_file_path = global_assumptions.get(
+        "pricing_file_path",
+        "price_file_library.xlsx",
+    )
+
+    pricing_deck = load_price_file(
+        pricing_file_path
+    ).rename(
+        columns={
+            "month": "date",
+            "oil_price": "deck_oil_price",
+            "gas_price": "deck_gas_price",
+        }
+    )
+
+    output = output.merge(
+        pricing_deck,
+        on="date",
+        how="left",
+    )
+
+    oil_flat_start_date = (
+        pd.Timestamp(
+            global_assumptions["oil_flat_start_date"]
+        )
+        .to_period("M")
+        .to_timestamp()
+    )
+
+    gas_flat_start_date = (
+        pd.Timestamp(
+            global_assumptions["gas_flat_start_date"]
+        )
+        .to_period("M")
+        .to_timestamp()
+    )
+
+    # These base values stay unchanged during sensitivities.
+    base_oil_price = float(
+        global_assumptions.get(
+            "base_oil_price",
+            terminal_oil_price,
+        )
+    )
+
+    base_gas_price = float(
+        global_assumptions.get(
+            "base_gas_price",
+            terminal_gas_price,
+        )
+    )
+
+    # This allows your existing sensitivity functions to shift
+    # the entire pricing curve.
+    oil_curve_shift = (
+        terminal_oil_price - base_oil_price
+    )
+
+    gas_curve_shift = (
+        terminal_gas_price - base_gas_price
+    )
+
+    output["index_oil_price"] = np.where(
+        output["date"] >= oil_flat_start_date,
+        terminal_oil_price,
+        output["deck_oil_price"] + oil_curve_shift,
+    )
+
+    output["index_gas_price"] = np.where(
+        output["date"] >= gas_flat_start_date,
+        terminal_gas_price,
+        output["deck_gas_price"] + gas_curve_shift,
+    )
+
+    # Only require file pricing before the applicable flat date.
+    missing_oil_mask = (
+        output["date"].lt(oil_flat_start_date)
+        & output["index_oil_price"].isna()
+    )
+
+    missing_gas_mask = (
+        output["date"].lt(gas_flat_start_date)
+        & output["index_gas_price"].isna()
+    )
+
+    if missing_oil_mask.any():
+        missing_dates = output.loc[
+            missing_oil_mask,
+            "date",
+        ].dt.strftime("%b %Y")
+
+        raise ValueError(
+            "The pricing file does not contain oil pricing for "
+            + ", ".join(missing_dates.unique()[:5])
+            + ". Either add those months to the file or select "
+            "an earlier oil flat-pricing date."
+        )
+
+    if missing_gas_mask.any():
+        missing_dates = output.loc[
+            missing_gas_mask,
+            "date",
+        ].dt.strftime("%b %Y")
+
+        raise ValueError(
+            "The pricing file does not contain gas pricing for "
+            + ", ".join(missing_dates.unique()[:5])
+            + ". Either add those months to the file or select "
+            "an earlier gas flat-pricing date."
+        )
+
+    return output[
+        [
+            "date",
+            "index_oil_price",
+            "index_gas_price",
+        ]
+    ]
 
 # -----------------------------
 # NGL factors
@@ -186,8 +481,7 @@ def run_single_slot_economics(slot, type_curve_library, global_assumptions, slot
     nri = float(slot["net_revenue_interest"])
     tc_risk = float(slot["tc_risk"])
 
-    oil_price = float(global_assumptions["oil_price"])
-    gas_price = float(global_assumptions["gas_price"])
+
     use_sev_tax_pct = bool(
         global_assumptions.get("use_sev_tax_pct", False)
     )
@@ -207,8 +501,49 @@ def run_single_slot_economics(slot, type_curve_library, global_assumptions, slot
 
     tc_info = type_curve_library[tc_name]
     base_lateral = float(tc_info["base_lateral"])
-    tc_df = tc_info["monthly"].copy()
-
+    
+    tc_df = (
+        tc_info["monthly"]
+        .copy()
+        .sort_values("month")
+        .reset_index(drop=True)
+    )
+    
+    tc_df["period"] = pd.to_numeric(
+        tc_df["month"],
+        errors="raise",
+    ).astype(int)
+    
+    spud_month = (
+        pd.Timestamp(spud_date)
+        .to_period("M")
+        .to_timestamp()
+    )
+    
+    production_start_month = (
+        spud_month
+        + pd.DateOffset(months=flowback_delay)
+    )
+    
+    tc_df["date"] = [
+        production_start_month
+        + pd.DateOffset(months=int(period) - 1)
+        for period in tc_df["period"]
+    ]
+    
+    index_pricing = build_index_price_series(
+        dates=tc_df["date"],
+        global_assumptions=global_assumptions,
+    )
+    
+    tc_df["index_oil_price"] = (
+        index_pricing["index_oil_price"].to_numpy()
+    )
+    
+    tc_df["index_gas_price"] = (
+        index_pricing["index_gas_price"].to_numpy()
+    )
+    
     ll_scale = lateral_length / base_lateral
 
     tc_df["base_oil_scaled"] = tc_df["oil"] * tc_risk * ll_scale
@@ -240,9 +575,20 @@ def run_single_slot_economics(slot, type_curve_library, global_assumptions, slot
         tc_df["gross_ngl_production"] - tc_df["ngl_royalty_volumes"]
     )
 
-    tc_df["local_oil_price"] = oil_price + oil_diff
-    tc_df["local_gas_price"] = gas_price + gas_diff
-    tc_df["local_ngl_price"] = oil_price * float(slot_ngl["ngl_pct_of_wti"])
+    tc_df["local_oil_price"] = (
+        tc_df["index_oil_price"]
+        + oil_diff
+    )
+    
+    tc_df["local_gas_price"] = (
+        tc_df["index_gas_price"]
+        + gas_diff
+    )
+    
+    tc_df["local_ngl_price"] = (
+        tc_df["index_oil_price"]
+        * float(slot_ngl["ngl_pct_of_wti"])
+    )
 
     tc_df["oil_revenue"] = tc_df["local_oil_price"] * tc_df["equity_oil_production"]
     tc_df["gas_revenue"] = tc_df["local_gas_price"] * tc_df["equity_gas_production"]
@@ -300,11 +646,25 @@ def run_single_slot_economics(slot, type_curve_library, global_assumptions, slot
     tc_df["net_revenue"] = tc_df["total_revenue"]
     tc_df["opex"] = tc_df["variable_loe"]
 
-    tc_df["period"] = tc_df["month"]
-
+    period_0_pricing = build_index_price_series(
+        dates=[spud_month],
+        global_assumptions=global_assumptions,
+    ).iloc[0]
+    
+    period_0_oil_index = float(
+        period_0_pricing["index_oil_price"]
+    )
+    
+    period_0_gas_index = float(
+        period_0_pricing["index_gas_price"]
+    )
+    
     period_0 = pd.DataFrame(
         {
             "period": [0],
+            "date": [spud_month],
+            "index_oil_price": [period_0_oil_index],
+            "index_gas_price": [period_0_gas_index],
             "base_oil_scaled": [0.0],
             "base_gas_scaled": [0.0],
             "gross_oil_production": [0.0],
@@ -317,9 +677,16 @@ def run_single_slot_economics(slot, type_curve_library, global_assumptions, slot
             "equity_oil_production": [0.0],
             "equity_gas_production": [0.0],
             "equity_ngl_production": [0.0],
-            "local_oil_price": [oil_price + oil_diff],
-            "local_gas_price": [gas_price + gas_diff],
-            "local_ngl_price": [oil_price * float(slot_ngl["ngl_pct_of_wti"])],
+            "local_oil_price": [
+                period_0_oil_index + oil_diff
+            ],
+            "local_gas_price": [
+                period_0_gas_index + gas_diff
+            ],
+            "local_ngl_price": [
+                period_0_oil_index
+                * float(slot_ngl["ngl_pct_of_wti"])
+            ],
             "oil_revenue": [0.0],
             "gas_revenue": [0.0],
             "ngl_revenue": [0.0],
@@ -338,6 +705,9 @@ def run_single_slot_economics(slot, type_curve_library, global_assumptions, slot
             period_0,
             tc_df[
                 [
+                    "date",
+                    "index_oil_price",
+                    "index_gas_price",
                     "period",
                     "base_oil_scaled",
                     "base_gas_scaled",
@@ -370,17 +740,6 @@ def run_single_slot_economics(slot, type_curve_library, global_assumptions, slot
         ignore_index=True,
     )
     df = df.sort_values("period").reset_index(drop=True)
-
-    dates = []
-    for _, row in df.iterrows():
-        if int(row["period"]) == 0:
-            dates.append(spud_date)
-        elif int(row["period"]) == 1:
-            dates.append(spud_date + pd.DateOffset(months=flowback_delay))
-        else:
-            dates.append(dates[-1] + pd.DateOffset(months=1))
-
-    df["date"] = dates
 
     df["capex"] = 0.0
     df.loc[df["period"] == 0, "capex"] = -(dc_costs * lateral_length)
@@ -1078,9 +1437,59 @@ def prepare_global_assumptions(deal_inputs):
         deal_inputs.get("use_sev_tax_pct", False)
     )
 
+    pricing_mode = str(
+        deal_inputs.get("pricing_mode", "flat")
+    ).lower()
+
+    if pricing_mode not in {"flat", "file"}:
+        raise ValueError(
+            f"Unsupported pricing mode: {pricing_mode}"
+        )
+
     return {
+        "pricing_mode": pricing_mode,
+
+        "pricing_file_path": str(
+            deal_inputs.get(
+                "pricing_file_path",
+                "price_file_library.xlsx",
+            )
+        ),
+
+        # In flat mode, these are the flat prices.
+        # In file mode, these are the terminal flat prices.
         "oil_price": float(deal_inputs["oil_price"]),
         "gas_price": float(deal_inputs["gas_price"]),
+
+        # These retain the original base-case values during sensitivities.
+        "base_oil_price": float(
+            deal_inputs.get(
+                "base_oil_price",
+                deal_inputs["oil_price"],
+            )
+        ),
+
+        "base_gas_price": float(
+            deal_inputs.get(
+                "base_gas_price",
+                deal_inputs["gas_price"],
+            )
+        ),
+
+        "oil_flat_start_date": pd.to_datetime(
+            deal_inputs.get(
+                "oil_flat_start_date",
+                "1900-01-01",
+            )
+        ),
+
+        "gas_flat_start_date": pd.to_datetime(
+            deal_inputs.get(
+                "gas_flat_start_date",
+                "1900-01-01",
+            )
+        ),
+
         "use_sev_tax_pct": use_sev_tax_pct,
 
         # In percentage mode, the app accepts whole percentages:
@@ -1307,6 +1716,8 @@ def build_deal_audit_view(deal_df):
         "date",
         "month_label",
         "month_num",
+        "index_oil_price",
+        "index_gas_price",
         "promote_monthly_investment",
         "promote_monthly_distributions",
         "promote_cumulative_investment",
@@ -1360,6 +1771,17 @@ def run_deal_model(slot_df, deal_inputs, type_curve_file="type_curve_library.xls
     all_slots_df = apply_promote_to_slots(all_slots_df, deal_settings)
     
     deal_df = roll_up_deal(all_slots_df)
+    
+    deal_index_pricing = build_index_price_series(
+        dates=deal_df["date"],
+        global_assumptions=global_assumptions,
+    )
+    
+    deal_df = deal_df.merge(
+        deal_index_pricing,
+        on="date",
+        how="left",
+    )
     
     slot_audit_df = build_slot_audit_view(all_slots_df)
     deal_audit_df = build_deal_audit_view(deal_df)
