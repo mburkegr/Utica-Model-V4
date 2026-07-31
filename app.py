@@ -539,6 +539,16 @@ def run_two_way_sensitivity(
     base_tc_risk = weighted_avg_by_net_acres(slot_df, "tc_risk")
     base_ngl_yield = weighted_avg_by_net_acres(slot_df, "ngl_yield")
     base_spud_month = weighted_avg_spud_month_by_net_acres(slot_df)
+    
+    base_dc_override_enabled = bool(
+        deal_inputs.get("use_dc_override", False)
+    )
+    
+    base_dc = (
+        float(deal_inputs.get("dc_override", 0.0))
+        if base_dc_override_enabled
+        else weighted_avg_by_net_acres(slot_df, "dc_costs")
+    )
 
     def apply_value(sens_slot_df, sens_deal_inputs, variable, value):
         if variable == "spud_date":
@@ -564,8 +574,30 @@ def run_two_way_sensitivity(
             sens_deal_inputs["bid_override"] = max(1.0, value)
 
         elif variable == "dc":
-            sens_deal_inputs["use_dc_override"] = True
-            sens_deal_inputs["dc_override"] = value
+            dc_delta = value - float(base_dc)
+        
+            if base_dc_override_enabled:
+                # A deal-level D&C override was selected in the base case,
+                # so move that uniform override up or down.
+                sens_deal_inputs["use_dc_override"] = True
+                sens_deal_inputs["dc_override"] = max(
+                    0.0,
+                    float(base_dc) + dc_delta,
+                )
+        
+            else:
+                # Preserve each slot's original D&C relationship and add
+                # the same sensitivity change to every slot.
+                sens_deal_inputs["use_dc_override"] = False
+        
+                sens_slot_df["dc_costs"] = (
+                    pd.to_numeric(
+                        sens_slot_df["dc_costs"],
+                        errors="coerce",
+                    )
+                    .fillna(0.0)
+                    + dc_delta
+                ).clip(lower=0.0)
 
         elif variable == "oil":
             sens_deal_inputs["oil_price"] = value
